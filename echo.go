@@ -87,17 +87,17 @@ func New(cfg Config) *Logger {
 
 	// log level
 	switch strings.ToUpper(cfg.LogLevel) {
-	case "FATAL":
+	case FATAL:
 		l.logLevel = 0
-	case "ERROR":
+	case ERROR:
 		l.logLevel = 1
-	case "WARN":
+	case WARN:
 		l.logLevel = 2
-	case "INFO":
+	case INFO:
 		l.logLevel = 3
-	case "DEBUG":
+	case DEBUG:
 		l.logLevel = 4
-	case "TRACE":
+	case TRACE:
 		l.logLevel = 5
 	default:
 		l.logLevel = 3
@@ -110,8 +110,10 @@ func New(cfg Config) *Logger {
 
 func (l *Logger) Close() error {
 	for _, f := range l.files {
-		if err := f.Close(); err != nil {
-			return err
+		if f != nil {
+			if err := f.Close(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
