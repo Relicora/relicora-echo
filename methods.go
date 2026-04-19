@@ -79,19 +79,19 @@ func (l *Logger) Infoln(v ...any) {
 // LOG
 func (l *Logger) Print(v ...any) {
 	if l.logLevel >= 3 {
-		l.baseLogger.Print(v...)
+		l.Print(v...)
 	}
 }
 
 func (l *Logger) Printf(format string, v ...any) {
 	if l.logLevel >= 3 {
-		l.baseLogger.Printf(format, v...)
+		l.Printf(format, v...)
 	}
 }
 
 func (l *Logger) Println(v ...any) {
 	if l.logLevel >= 3 {
-		l.baseLogger.Println(v...)
+		l.Println(v...)
 	}
 }
 

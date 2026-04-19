@@ -9,7 +9,7 @@ import (
 )
 
 type Logger struct {
-	baseLogger  *log.Logger
+	*log.Logger
 	fatalLogger *log.Logger
 	errorLogger *log.Logger
 	warnLogger  *log.Logger
@@ -77,7 +77,7 @@ func New(cfg Config) *Logger {
 	}
 
 	// create loggers
-	l.baseLogger = log.New(baseWriter, "LOG:   ", log.Ldate|log.Ltime)
+	l.Logger = log.New(baseWriter, "LOG:   ", log.Ldate|log.Ltime)
 	l.fatalLogger = log.New(buildWriter(cfg.FatalOutputPath), "FATAL: ", log.Ldate|log.Ltime)
 	l.errorLogger = log.New(buildWriter(cfg.ErrorOutputPath), "ERROR: ", log.Ldate|log.Ltime)
 	l.warnLogger = log.New(buildWriter(cfg.WarnOutputPath), "WARN:  ", log.Ldate|log.Ltime)
