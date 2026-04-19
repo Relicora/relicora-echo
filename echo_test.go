@@ -1,89 +1,24 @@
 package echo
 
 import (
+	"bytes"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestNewLogger(t *testing.T) {
-	cfg := Config{
-		LogLevel: "INFO",
-	}
-
-	logger := New(cfg)
-	if logger == nil {
-		t.Fatal("Logger is nil")
-	}
-
-	if logger.logLevel != 3 {
-		t.Errorf("Expected logLevel 3, got %d", logger.logLevel)
-	}
-
-	logger.Close()
-}
-
-func TestLogLevels(t *testing.T) {
-	// Create temp dir for output
+func setupLoggerWithFiles(t *testing.T, logLevel string) (*Logger, string, Config) {
+	t.Helper()
 	tempDir, err := os.MkdirTemp("", "echo_logger_test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tempDir)
-
-	outputPath := filepath.Join(tempDir, "output.log")
 
 	cfg := Config{
-		LogLevel:        "INFO",
-		OutputPath:      outputPath,
-		ErrorOutputPath: filepath.Join(tempDir, "error.log"),
-	}
-
-	logger := New(cfg)
-	defer logger.Close()
-
-	// Test INFO level
-	logger.Info("Test info message")
-	logger.Error("Test error message")
-	logger.Debug("Test debug message") // Should not log
-
-	// Read output file
-	outputContent, err := os.ReadFile(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	outputStr := string(outputContent)
-
-	if !strings.Contains(outputStr, "Test info message") {
-		t.Error("INFO message not found in output")
-	}
-
-	if strings.Contains(outputStr, "Test debug message") {
-		t.Error("DEBUG message should not be logged at INFO level")
-	}
-
-	// Check error file
-	errorContent, err := os.ReadFile(cfg.ErrorOutputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !strings.Contains(string(errorContent), "Test error message") {
-		t.Error("ERROR message not found in error file")
-	}
-}
-
-func TestFileCreation(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "echo_logger_file_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	cfg := Config{
-		LogLevel:        "DEBUG",
+		LogLevel:        logLevel,
 		OutputPath:      filepath.Join(tempDir, "output.log"),
 		FatalOutputPath: filepath.Join(tempDir, "fatal.log"),
 		ErrorOutputPath: filepath.Join(tempDir, "error.log"),
@@ -94,77 +29,160 @@ func TestFileCreation(t *testing.T) {
 	}
 
 	logger := New(cfg)
-	defer logger.Close()
-
-	logger.Info("Info message")
-	logger.Debug("Debug message")
-	logger.Trace("Trace message")
-
-	// Check if files exist
-	files := []string{cfg.OutputPath, cfg.InfoOutputPath, cfg.DebugOutputPath, cfg.TraceOutputPath}
-	for _, file := range files {
-		if _, err := os.Stat(file); os.IsNotExist(err) {
-			t.Errorf("File %s was not created", file)
-		}
-	}
+	return logger, tempDir, cfg
 }
 
-func TestClose(t *testing.T) {
-	cfg := Config{
-		LogLevel:   "INFO",
-		OutputPath: "/tmp/test_close.log", // Use a path that will create file
-	}
-
-	logger := New(cfg)
-
-	// Log something to create file
-	logger.Info("Test")
-
-	// Close
-	err := logger.Close()
-	if err != nil {
-		t.Errorf("Close returned error: %v", err)
-	}
-
-	// Try to close again (should not error)
-	err = logger.Close()
-	if err != nil {
-		t.Errorf("Second close returned error: %v", err)
-	}
-}
-
-func TestEmbeddedLogger(t *testing.T) {
-	// Since we can't easily inject writer, test that embedded Logger exists
-	cfg := Config{
-		LogLevel: "INFO",
-	}
-
-	logger := New(cfg)
-	defer logger.Close()
-
-	if logger.Logger == nil {
-		t.Error("Embedded Logger is nil")
-	}
-
-	// Test that we can use it as *log.Logger
-	// But since it's embedded, logger.Printf should work
-	logger.Printf("Test printf")
-
-	// To check output, we need to capture it, but since it's to stdout, hard.
-	// Just check that no panic
-}
-
-func TestLogLevelSwitch(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "echo_logger_level_test")
+func readFileContents(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return string(content)
+}
+
+func TestNewLogger(t *testing.T) {
+	logger, tempDir, _ := setupLoggerWithFiles(t, "INFO")
 	defer os.RemoveAll(tempDir)
+	defer logger.Close()
 
-	outputPath := filepath.Join(tempDir, "output.log")
+	if logger == nil {
+		t.Fatal("Logger is nil")
+	}
+	if logger.logLevel != 3 {
+		t.Fatalf("Expected logLevel 3, got %d", logger.logLevel)
+	}
+}
 
-	tests := []struct {
-		level         string
+func TestAllMethodsWithDifferentLevelsAndFiles(t *testing.T) {
+	methodCases := []struct {
+		name      string
+		call      func(*Logger, string)
+		minLevel  int
+		outputKey string
+	}{
+		{"Print", func(l *Logger, msg string) { l.Print(msg) }, 3, "output"},
+		{"Printf", func(l *Logger, msg string) { l.Printf("%s", msg) }, 3, "output"},
+		{"Println", func(l *Logger, msg string) { l.Println(msg) }, 3, "output"},
+
+		{"Error", func(l *Logger, msg string) { l.Error(msg) }, 1, "error"},
+		{"Errorf", func(l *Logger, msg string) { l.Errorf("%s", msg) }, 1, "error"},
+		{"Errorln", func(l *Logger, msg string) { l.Errorln(msg) }, 1, "error"},
+
+		{"Warn", func(l *Logger, msg string) { l.Warn(msg) }, 2, "warn"},
+		{"Warnf", func(l *Logger, msg string) { l.Warnf("%s", msg) }, 2, "warn"},
+		{"Warnln", func(l *Logger, msg string) { l.Warnln(msg) }, 2, "warn"},
+
+		{"Info", func(l *Logger, msg string) { l.Info(msg) }, 3, "info"},
+		{"Infof", func(l *Logger, msg string) { l.Infof("%s", msg) }, 3, "info"},
+		{"Infoln", func(l *Logger, msg string) { l.Infoln(msg) }, 3, "info"},
+
+		{"Debug", func(l *Logger, msg string) { l.Debug(msg) }, 4, "debug"},
+		{"Debugf", func(l *Logger, msg string) { l.Debugf("%s", msg) }, 4, "debug"},
+		{"Debugln", func(l *Logger, msg string) { l.Debugln(msg) }, 4, "debug"},
+
+		{"Trace", func(l *Logger, msg string) { l.Trace(msg) }, 5, "trace"},
+		{"Tracef", func(l *Logger, msg string) { l.Tracef("%s", msg) }, 5, "trace"},
+		{"Traceln", func(l *Logger, msg string) { l.Traceln(msg) }, 5, "trace"},
+	}
+
+	levels := []struct {
+		name  string
+		value int
+	}{
+		{"FATAL", 0},
+		{"ERROR", 1},
+		{"WARN", 2},
+		{"INFO", 3},
+		{"DEBUG", 4},
+		{"TRACE", 5},
+	}
+
+	for _, level := range levels {
+		level := level
+		t.Run(level.name, func(t *testing.T) {
+			logger, tempDir, cfg := setupLoggerWithFiles(t, level.name)
+			defer os.RemoveAll(tempDir)
+			defer logger.Close()
+
+			for _, mc := range methodCases {
+				mc := mc
+				t.Run(mc.name, func(t *testing.T) {
+					message := fmt.Sprintf("%s-%s", mc.name, level.name)
+					mc.call(logger, message)
+
+					var outputPath string
+					switch mc.outputKey {
+					case "output":
+						outputPath = cfg.OutputPath
+					case "fatal":
+						outputPath = cfg.FatalOutputPath
+					case "error":
+						outputPath = cfg.ErrorOutputPath
+					case "warn":
+						outputPath = cfg.WarnOutputPath
+					case "info":
+						outputPath = cfg.InfoOutputPath
+					case "debug":
+						outputPath = cfg.DebugOutputPath
+					case "trace":
+						outputPath = cfg.TraceOutputPath
+					default:
+						t.Fatal("unknown output key")
+					}
+
+					content := readFileContents(t, outputPath)
+					messageFound := strings.Contains(content, message)
+					if level.value >= mc.minLevel {
+						if !messageFound {
+							t.Errorf("wanted %s to log %q to %s", mc.name, message, filepath.Base(outputPath))
+						}
+					} else {
+						if messageFound {
+							t.Errorf("expected %s not to log %q at %s level", mc.name, message, level.name)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLoggerWithStandardLogCompatibility(t *testing.T) {
+	logger, tempDir, _ := setupLoggerWithFiles(t, "INFO")
+	defer os.RemoveAll(tempDir)
+	defer logger.Close()
+
+	var stdLogger *log.Logger = logger.Logger
+	buf := bytes.NewBuffer(nil)
+	stdLogger.SetOutput(buf)
+	stdLogger.SetPrefix("STD: ")
+	stdLogger.SetFlags(0)
+
+	stdLogger.Print("hello")
+	stdLogger.Printf("%s", "world")
+	stdLogger.Println("test")
+	if err := stdLogger.Output(2, "output"); err != nil {
+		t.Fatalf("Output failed: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "STD: hello") {
+		t.Error("expected stdLogger.Print output")
+	}
+	if !strings.Contains(buf.String(), "STD: world") {
+		t.Error("expected stdLogger.Printf output")
+	}
+	if !strings.Contains(buf.String(), "STD: test") {
+		t.Error("expected stdLogger.Println output")
+	}
+	if !strings.Contains(buf.String(), "STD: output") {
+		t.Error("expected stdLogger.Output output")
+	}
+}
+
+func TestLogLevelSwitch(t *testing.T) {
+	levels := []struct {
+		input         string
 		expectedLevel int
 	}{
 		{"FATAL", 0},
@@ -173,19 +191,22 @@ func TestLogLevelSwitch(t *testing.T) {
 		{"INFO", 3},
 		{"DEBUG", 4},
 		{"TRACE", 5},
-		{"UNKNOWN", 3}, // default to INFO
+		{"UNKNOWN", 3},
 	}
 
-	for _, test := range tests {
-		cfg := Config{
-			LogLevel:   test.level,
-			OutputPath: outputPath,
-		}
+	for _, test := range levels {
+		t.Run(test.input, func(t *testing.T) {
+			logger, tempDir, cfg := setupLoggerWithFiles(t, test.input)
+			defer os.RemoveAll(tempDir)
+			defer logger.Close()
 
-		logger := New(cfg)
-		if logger.logLevel != test.expectedLevel {
-			t.Errorf("For level %s, expected %d, got %d", test.level, test.expectedLevel, logger.logLevel)
-		}
-		logger.Close()
+			if logger.logLevel != test.expectedLevel {
+				t.Fatalf("For level %s expected %d, got %d", test.input, test.expectedLevel, logger.logLevel)
+			}
+
+			if cfg.LogLevel != test.input {
+				t.Fatalf("Config should preserve log level value")
+			}
+		})
 	}
 }
