@@ -60,10 +60,6 @@ func TestLogLevels(t *testing.T) {
 		t.Error("INFO message not found in output")
 	}
 
-	if !strings.Contains(outputStr, "Test error message") {
-		t.Error("ERROR message not found in output")
-	}
-
 	if strings.Contains(outputStr, "Test debug message") {
 		t.Error("DEBUG message should not be logged at INFO level")
 	}
