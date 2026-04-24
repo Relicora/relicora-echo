@@ -117,6 +117,10 @@ func rotateFilePath(path string, when time.Time) string {
 	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", base, suffix, ext))
 }
 
+// New creates a Logger configured with the provided settings.
+//
+// If cfg.RotateDaily is true and cfg.RotationTime is set, the logger starts a daily
+// rotation goroutine that renames current log files at the configured local time.
 func New(cfg Config) *Logger {
 	l := &Logger{
 		config: cfg,
@@ -250,6 +254,9 @@ func (l *Logger) rotateAll(at time.Time) {
 	}
 }
 
+// Close stops any active rotation goroutine and closes all open log files.
+//
+// It returns the first error encountered while closing files, if any.
 func (l *Logger) Close() error {
 	if l.rotationStop != nil {
 		close(l.rotationStop)
