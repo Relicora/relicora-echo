@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+- 
+
 ## [v0.3.0] - 2026-04-24
 ### Added
 - Daily log rotation support for file outputs.
@@ -33,6 +36,3 @@ All notable changes to this project will be documented in this file.
 ## [v0.1.0] - 2026-04-18
 ### Added
 - Initial logger implementation with per-level file outputs and configurable log levels.
-
-## [Unreleased]
-- 
