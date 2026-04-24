@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.3.1] - 2026-04-25
+### Improved
+- Added GoDoc comments for all public logger methods to improve editor hover help and documentation.
+
 ## [Unreleased]
 - 
 

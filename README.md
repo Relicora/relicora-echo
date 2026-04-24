@@ -14,7 +14,7 @@
 ## Installation
 
 ```bash
-go get github.com/Relicora/relicora-echo@v0.3.0
+go get github.com/Relicora/relicora-echo@v0.3.1
 ```
 
 Import the package in your code:
