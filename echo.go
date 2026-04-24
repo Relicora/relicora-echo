@@ -1,11 +1,14 @@
 package echo
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 type Logger struct {
@@ -17,9 +20,11 @@ type Logger struct {
 	debugLogger *log.Logger
 	traceLogger *log.Logger
 
-	files    []*os.File
-	logLevel int
-	config   Config
+	files        []io.Closer
+	rotationStop chan struct{}
+	rotationDone chan struct{}
+	logLevel     int
+	config       Config
 }
 
 type Config struct {
@@ -31,6 +36,85 @@ type Config struct {
 	InfoOutputPath  string
 	DebugOutputPath string
 	TraceOutputPath string
+
+	RotateDaily  bool
+	RotationTime string // format "15:04", local system timezone
+}
+
+type rotatingFile struct {
+	sync.Mutex
+	path string
+	file *os.File
+}
+
+var nowFunc = time.Now
+var newTimer = time.NewTimer
+
+func (r *rotatingFile) Write(p []byte) (int, error) {
+	r.Lock()
+	defer r.Unlock()
+	if r.file == nil {
+		return 0, fmt.Errorf("rotating file is closed")
+	}
+	return r.file.Write(p)
+}
+
+func (r *rotatingFile) Close() error {
+	r.Lock()
+	defer r.Unlock()
+	if r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	return err
+}
+
+func (r *rotatingFile) Rotate(at time.Time) error {
+	r.Lock()
+	defer r.Unlock()
+
+	if r.file == nil {
+		return nil
+	}
+
+	if err := r.file.Close(); err != nil {
+		return err
+	}
+
+	rotatedPath := rotateFilePath(r.path, at)
+	if err := os.Rename(r.path, rotatedPath); err != nil && !os.IsNotExist(err) {
+		f, openErr := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if openErr == nil {
+			r.file = f
+		}
+		return err
+	}
+
+	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		return err
+	}
+
+	r.file = f
+	return nil
+}
+
+func nextRotationTime(now time.Time, hour, minute int) time.Time {
+	local := now.In(time.Local)
+	next := time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, time.Local)
+	if !next.After(local) {
+		next = next.Add(24 * time.Hour)
+	}
+	return next
+}
+
+func rotateFilePath(path string, when time.Time) string {
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(filepath.Base(path), ext)
+	dir := filepath.Dir(path)
+	suffix := when.Format("2006-01-02_150405")
+	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", base, suffix, ext))
 }
 
 func New(cfg Config) *Logger {
@@ -38,8 +122,20 @@ func New(cfg Config) *Logger {
 		config: cfg,
 	}
 
+	rotationEnabled := cfg.RotateDaily && cfg.RotationTime != ""
+	rotationHour := 0
+	rotationMinute := 0
+	if rotationEnabled {
+		parsed, err := time.Parse("15:04", cfg.RotationTime)
+		if err != nil {
+			log.Fatal(err)
+		}
+		rotationHour = parsed.Hour()
+		rotationMinute = parsed.Minute()
+	}
+
 	// helper
-	openFile := func(path string) *os.File {
+	openFile := func(path string) io.Writer {
 		if path == "" {
 			return nil
 		}
@@ -52,6 +148,12 @@ func New(cfg Config) *Logger {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err != nil {
 			log.Fatal(err)
+		}
+
+		if rotationEnabled {
+			rf := &rotatingFile{path: path, file: f}
+			l.files = append(l.files, rf)
+			return rf
 		}
 
 		l.files = append(l.files, f)
@@ -103,19 +205,65 @@ func New(cfg Config) *Logger {
 		l.logLevel = 3
 	}
 
+	if rotationEnabled {
+		l.startRotation(rotationHour, rotationMinute)
+	}
+
 	l.infoLogger.Printf("Logger started with log_level='%s'", cfg.LogLevel)
 
 	return l
 }
 
+func (l *Logger) startRotation(hour, minute int) {
+	l.rotationStop = make(chan struct{})
+	l.rotationDone = make(chan struct{})
+
+	go func() {
+		defer close(l.rotationDone)
+		for {
+			now := nowFunc()
+			next := nextRotationTime(now, hour, minute)
+			timer := newTimer(next.Sub(now))
+			select {
+			case <-timer.C:
+				l.rotateAll(next)
+			case <-l.rotationStop:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			}
+		}
+	}()
+}
+
+func (l *Logger) rotateAll(at time.Time) {
+	for _, closer := range l.files {
+		if rf, ok := closer.(*rotatingFile); ok {
+			if err := rf.Rotate(at); err != nil {
+				log.Printf("log rotation failed for %s: %v", rf.path, err)
+			}
+		}
+	}
+}
+
 func (l *Logger) Close() error {
-	for i, f := range l.files {
-		if f != nil {
-			if err := f.Close(); err != nil {
-				return err
+	if l.rotationStop != nil {
+		close(l.rotationStop)
+		<-l.rotationDone
+	}
+
+	var firstErr error
+	for i, closer := range l.files {
+		if closer != nil {
+			if err := closer.Close(); err != nil && firstErr == nil {
+				firstErr = err
 			}
 			l.files[i] = nil
 		}
 	}
-	return nil
+	return firstErr
 }

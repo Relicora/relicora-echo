@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setupLoggerWithFiles(t *testing.T, logLevel string) (*Logger, string, Config) {
@@ -208,5 +209,61 @@ func TestLogLevelSwitch(t *testing.T) {
 				t.Fatalf("Config should preserve log level value")
 			}
 		})
+	}
+}
+
+func TestNextRotationTimeUsesSystemTimezone(t *testing.T) {
+	now := time.Date(2026, 4, 24, 1, 30, 0, 0, time.Local)
+	next := nextRotationTime(now, 2, 0)
+	expected := time.Date(2026, 4, 24, 2, 0, 0, 0, time.Local)
+	if !next.Equal(expected) {
+		t.Fatalf("expected next rotation %v, got %v", expected, next)
+	}
+
+	now = time.Date(2026, 4, 24, 2, 0, 0, 0, time.Local)
+	next = nextRotationTime(now, 2, 0)
+	expected = time.Date(2026, 4, 25, 2, 0, 0, 0, time.Local)
+	if !next.Equal(expected) {
+		t.Fatalf("expected next rotation %v, got %v", expected, next)
+	}
+}
+
+func TestRotatingFileRotate(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "logs", "app.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rf := &rotatingFile{path: path, file: f}
+	if _, err := rf.Write([]byte("hello\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	rotateAt := time.Date(2026, 4, 24, 2, 0, 0, 0, time.Local)
+	if err := rf.Rotate(rotateAt); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected new file to exist: %v", err)
+	}
+
+	rotatedPath := rotateFilePath(path, rotateAt)
+	if _, err := os.Stat(rotatedPath); err != nil {
+		t.Fatalf("expected rotated file %q: %v", rotatedPath, err)
+	}
+
+	content, err := os.ReadFile(rotatedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "hello") {
+		t.Fatalf("rotated file missing expected content")
 	}
 }
