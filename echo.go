@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,12 +41,26 @@ type Config struct {
 
 	RotateDaily  bool
 	RotationTime string // format "15:04", local system timezone
+
+	RotationMode  string // "none", "time", "size", "time-and-size"
+	MaxSizeBytes  int64
+	RetentionDays int
 }
+
+const (
+	RotationModeNone        = "none"
+	RotationModeTime        = "time"
+	RotationModeSize        = "size"
+	RotationModeTimeAndSize = "time-and-size"
+)
 
 type rotatingFile struct {
 	sync.Mutex
-	path string
-	file *os.File
+	path          string
+	file          *os.File
+	maxSize       int64
+	retentionDays int
+	size          int64
 }
 
 var nowFunc = time.Now
@@ -56,7 +72,16 @@ func (r *rotatingFile) Write(p []byte) (int, error) {
 	if r.file == nil {
 		return 0, fmt.Errorf("rotating file is closed")
 	}
-	return r.file.Write(p)
+
+	if r.maxSize > 0 && r.size > 0 && r.size+int64(len(p)) > r.maxSize {
+		if err := r.rotateLocked(nowFunc(), 0); err != nil {
+			return 0, err
+		}
+	}
+
+	n, err := r.file.Write(p)
+	r.size += int64(n)
+	return n, err
 }
 
 func (r *rotatingFile) Close() error {
@@ -70,10 +95,21 @@ func (r *rotatingFile) Close() error {
 	return err
 }
 
-func (r *rotatingFile) Rotate(at time.Time) error {
+func (r *rotatingFile) Rotate(at time.Time, sequence int) error {
 	r.Lock()
 	defer r.Unlock()
+	return r.rotateLocked(at, sequence)
+}
 
+func (r *rotatingFile) rotateByTime(at time.Time) error {
+	return r.rotateLocked(at, 0)
+}
+
+func (r *rotatingFile) rotateBySize(at time.Time) error {
+	return r.rotateLocked(at, 0)
+}
+
+func (r *rotatingFile) rotateLocked(at time.Time, sequence int) error {
 	if r.file == nil {
 		return nil
 	}
@@ -82,8 +118,11 @@ func (r *rotatingFile) Rotate(at time.Time) error {
 		return err
 	}
 
-	rotatedPath := rotateFilePath(r.path, at)
-	if err := os.Rename(r.path, rotatedPath); err != nil && !os.IsNotExist(err) {
+	archivePath, err := rotateFilePath(r.path, at, sequence)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(r.path, archivePath); err != nil && !os.IsNotExist(err) {
 		f, openErr := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if openErr == nil {
 			r.file = f
@@ -97,7 +136,63 @@ func (r *rotatingFile) Rotate(at time.Time) error {
 	}
 
 	r.file = f
+	r.size = 0
+	if r.retentionDays > 0 {
+		if err := r.cleanupRotatedFiles(at); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (r *rotatingFile) cleanupRotatedFiles(at time.Time) error {
+	if r.retentionDays <= 0 {
+		return nil
+	}
+
+	cutoff := at.AddDate(0, 0, -r.retentionDays)
+	ext := filepath.Ext(r.path)
+	base := strings.TrimSuffix(filepath.Base(r.path), ext)
+	dir := filepath.Dir(r.path)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, base+"-") || !strings.HasSuffix(name, ext) {
+			continue
+		}
+		stamp, ok := parseArchiveDate(name, ext)
+		if !ok {
+			continue
+		}
+		if !stamp.Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func parseArchiveDate(name, ext string) (time.Time, bool) {
+	stem := strings.TrimSuffix(name, ext)
+	match := regexp.MustCompile(`-(\d{4})-(\d{2})-(\d{2})(?:-\d+)?$`).FindStringSubmatch(stem)
+	if len(match) != 4 {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse("2006-01-02", match[1]+"-"+match[2]+"-"+match[3])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
 }
 
 func nextRotationTime(now time.Time, hour, minute int) time.Time {
@@ -109,12 +204,73 @@ func nextRotationTime(now time.Time, hour, minute int) time.Time {
 	return next
 }
 
-func rotateFilePath(path string, when time.Time) string {
+func resolveRotationMode(cfg Config) string {
+	mode := strings.ToLower(strings.TrimSpace(cfg.RotationMode))
+	switch mode {
+	case RotationModeNone, RotationModeTime, RotationModeSize, RotationModeTimeAndSize:
+		return mode
+	default:
+	}
+
+	if cfg.RotateDaily && cfg.MaxSizeBytes > 0 {
+		return RotationModeTimeAndSize
+	}
+	if cfg.RotateDaily {
+		return RotationModeTime
+	}
+	if cfg.MaxSizeBytes > 0 {
+		return RotationModeSize
+	}
+	return RotationModeNone
+}
+
+func rotationArchiveTime(at time.Time, hour, minute int) time.Time {
+	if hour == 0 && minute == 0 {
+		return at.AddDate(0, 0, -1)
+	}
+	return at
+}
+
+func nextArchiveSequence(path string, when time.Time) int {
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(filepath.Base(path), ext)
 	dir := filepath.Dir(path)
-	suffix := when.Format("2006-01-02_150405")
-	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", base, suffix, ext))
+	prefix := fmt.Sprintf("%s-%s-", base, when.Format("2006-01-02"))
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 1
+	}
+
+	highest := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ext) {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, prefix)
+		suffix = strings.TrimSuffix(suffix, ext)
+		seq, err := strconv.Atoi(suffix)
+		if err == nil && seq > highest {
+			highest = seq
+		}
+	}
+	return highest + 1
+}
+
+func rotateFilePath(path string, when time.Time, sequence int) (string, error) {
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(filepath.Base(path), ext)
+	dir := filepath.Dir(path)
+	archiveDate := rotationArchiveTime(when, when.Hour(), when.Minute())
+	stamp := archiveDate.Format("2006-01-02")
+	if sequence <= 0 {
+		sequence = nextArchiveSequence(path, archiveDate)
+	}
+	return filepath.Join(dir, fmt.Sprintf("%s-%s-%04d%s", base, stamp, sequence, ext)), nil
 }
 
 // New creates a Logger configured with the provided settings.
@@ -126,10 +282,12 @@ func New(cfg Config) *Logger {
 		config: cfg,
 	}
 
-	rotationEnabled := cfg.RotateDaily && cfg.RotationTime != ""
+	rotationMode := resolveRotationMode(cfg)
+	timeRotationEnabled := rotationMode == RotationModeTime || rotationMode == RotationModeTimeAndSize || rotationMode == RotationModeSize
+	rotationEnabled := rotationMode != RotationModeNone || cfg.RetentionDays > 0
 	rotationHour := 0
 	rotationMinute := 0
-	if rotationEnabled {
+	if cfg.RotationTime != "" && (rotationMode == RotationModeTime || rotationMode == RotationModeTimeAndSize) {
 		parsed, err := time.Parse("15:04", cfg.RotationTime)
 		if err != nil {
 			log.Fatal(err)
@@ -155,7 +313,7 @@ func New(cfg Config) *Logger {
 		}
 
 		if rotationEnabled {
-			rf := &rotatingFile{path: path, file: f}
+			rf := &rotatingFile{path: path, file: f, maxSize: cfg.MaxSizeBytes, retentionDays: cfg.RetentionDays}
 			l.files = append(l.files, rf)
 			return rf
 		}
@@ -209,7 +367,7 @@ func New(cfg Config) *Logger {
 		l.logLevel = 3
 	}
 
-	if rotationEnabled {
+	if timeRotationEnabled {
 		l.startRotation(rotationHour, rotationMinute)
 	}
 
@@ -247,7 +405,10 @@ func (l *Logger) startRotation(hour, minute int) {
 func (l *Logger) rotateAll(at time.Time) {
 	for _, closer := range l.files {
 		if rf, ok := closer.(*rotatingFile); ok {
-			if err := rf.Rotate(at); err != nil {
+			rf.Lock()
+			err := rf.rotateByTime(at)
+			rf.Unlock()
+			if err != nil {
 				log.Printf("log rotation failed for %s: %v", rf.path, err)
 			}
 		}

@@ -9,6 +9,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 - 
 
+## [v0.4.0] - 2026-08-01
+### Added
+- Added explicit rotation modes: `none`, `time`, `size`, and `time-and-size`.
+- Added size-based log rotation with configurable `MaxSizeBytes`.
+- Added retention cleanup for rotated files through `RetentionDays`.
+- Added midnight rollover support for size-based rotation, using the previous day in archive names and the next sequence number.
+
+### Changed
+- Time-based rotation now uses the explicit `RotationMode` selection model.
+- Archive names now use the format `base-YYYY-MM-DD-000N.ext`.
+
 ## [v0.3.0] - 2026-04-24
 ### Added
 - Daily log rotation support for file outputs.

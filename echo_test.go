@@ -246,7 +246,7 @@ func TestRotatingFileRotate(t *testing.T) {
 	}
 
 	rotateAt := time.Date(2026, 4, 24, 2, 0, 0, 0, time.Local)
-	if err := rf.Rotate(rotateAt); err != nil {
+	if err := rf.Rotate(rotateAt, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -254,16 +254,147 @@ func TestRotatingFileRotate(t *testing.T) {
 		t.Fatalf("expected new file to exist: %v", err)
 	}
 
-	rotatedPath := rotateFilePath(path, rotateAt)
-	if _, err := os.Stat(rotatedPath); err != nil {
-		t.Fatalf("expected rotated file %q: %v", rotatedPath, err)
-	}
-
-	content, err := os.ReadFile(rotatedPath)
+	_, err = rotateFilePath(path, rotateAt, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(content), "hello") {
+	entries, readErr := os.ReadDir(filepath.Dir(path))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	found := false
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "app-2026-04-24-") && strings.HasSuffix(entry.Name(), ".log") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a rotated file in %s", filepath.Dir(path))
+	}
+
+	var archivedContent string
+	for _, entry := range entries {
+		if entry.Name() != "app.log" {
+			content, err := os.ReadFile(filepath.Join(filepath.Dir(path), entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			archivedContent = string(content)
+			break
+		}
+	}
+	if !strings.Contains(archivedContent, "hello") {
 		t.Fatalf("rotated file missing expected content")
+	}
+}
+
+func TestRotationArchiveTimeUsesPreviousDayForMidnight(t *testing.T) {
+	at := time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local)
+	got := rotationArchiveTime(at, 0, 0)
+	expected := time.Date(2026, 7, 31, 0, 0, 0, 0, time.Local)
+	if !got.Equal(expected) {
+		t.Fatalf("expected midnight archive time %v, got %v", expected, got)
+	}
+}
+
+func TestRotatingFileRotatesBySizeAndUsesSequenceNumber(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "app.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rf := &rotatingFile{path: path, file: f, maxSize: 10}
+	if _, err := rf.Write([]byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rf.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(entries))
+	}
+
+	var rotatedName string
+	for _, entry := range entries {
+		if entry.Name() != "app.log" {
+			rotatedName = entry.Name()
+			break
+		}
+	}
+	if rotatedName == "" {
+		t.Fatal("expected a rotated file")
+	}
+	if !strings.Contains(rotatedName, "-0001") {
+		t.Fatalf("expected sequence number in rotated file name, got %s", rotatedName)
+	}
+}
+
+func TestRotatingFileRetentionDeletesOldRotatedFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "app.log")
+	if err := os.WriteFile(filepath.Join(tempDir, "app-2026-07-01.log"), []byte("old"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "app-2026-07-20.log"), []byte("old"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "app-2026-08-01.log"), []byte("new"), 0666); err != nil {
+		t.Fatal(err)
+	}
+
+	rf := &rotatingFile{path: path, retentionDays: 7}
+	if err := rf.cleanupRotatedFiles(time.Date(2026, 8, 8, 0, 0, 0, 0, time.Local)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"app-2026-07-01.log", "app-2026-07-20.log"} {
+		if _, err := os.Stat(filepath.Join(tempDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to be removed", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, "app-2026-08-01.log")); err != nil {
+		t.Fatalf("expected recent rotated file to remain: %v", err)
+	}
+}
+
+func TestRotateBySizeUsesYesterdayDateAtMidnight(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "app.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rf := &rotatingFile{path: path, file: f, maxSize: 1024}
+	at := time.Date(2026, 8, 1, 0, 0, 0, 0, time.Local)
+	if err := rf.rotateBySize(at); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(entries))
+	}
+
+	var found bool
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "app-2026-07-31-") && strings.HasSuffix(entry.Name(), ".log") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected archived file with yesterday's date, got %v", entries)
 	}
 }
