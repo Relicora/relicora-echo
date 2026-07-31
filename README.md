@@ -1,6 +1,6 @@
 # relicora-echo
 
-`relicora-echo` is a lightweight Go logging library with per-level file output, standard logger compatibility, and optional daily log rotation using the system local timezone.
+`relicora-echo` is a lightweight Go logging library with per-level file output, standard logger compatibility, and configurable log rotation.
 
 ## Features
 
@@ -8,13 +8,15 @@
 - Separate file targets for each log level
 - Fallback to a shared output file for levels without their own path
 - Compatible with Go's standard `log.Logger`
-- Optional daily rotation of log files at a configured local time
+- Optional rotation by time, by size, or both
+- Midnight rollover for size-based rotation using the previous day in the archive name
+- Optional retention of rotated files for a configurable number of days
 - Safe close semantics for file handles and rotation goroutines
 
 ## Installation
 
 ```bash
-go get github.com/Relicora/relicora-echo@v0.3.1
+go get github.com/Relicora/relicora-echo@v0.4.0
 ```
 
 Import the package in your code:
@@ -54,15 +56,21 @@ func main() {
 }
 ```
 
-### Using daily rotation
+### Using rotation
 
-Enable daily rotation by setting `RotateDaily` and `RotationTime` in the configuration.
-The rotation time uses the system local timezone.
+You can choose how logs should rotate by setting `RotationMode`.
+Supported values are:
+
+- `none` - disable rotation
+- `time` - rotate by schedule
+- `size` - rotate when the current file exceeds `MaxSizeBytes`
+- `time-and-size` - rotate by either condition
 
 ```go
 cfg := echo.Config{
     LogLevel:      "INFO",
     OutputPath:    "logs/output.log",
+    RotationMode:  echo.RotationModeTime,
     RotateDaily:   true,
     RotationTime:  "02:00", // rotate at 02:00 local time each day
 }
@@ -71,7 +79,21 @@ logger := echo.New(cfg)
 defer logger.Close()
 ```
 
-When rotation occurs, the existing file is renamed to include a timestamp suffix, for example: `output-2026-04-24_020000.log`.
+For size-based rotation:
+
+```go
+cfg := echo.Config{
+    LogLevel:      "INFO",
+    OutputPath:    "logs/output.log",
+    RotationMode:  echo.RotationModeSize,
+    MaxSizeBytes:  10 * 1024 * 1024,
+    RetentionDays: 30,
+}
+```
+
+When a rotation happens, the current log file is archived with a name like:
+`output-2026-08-01-0001.log`.
+For midnight rollover in size-based mode, the archive uses the previous day in the name, for example `output-2026-07-31-0002.log`.
 
 ## Configuration
 
@@ -85,8 +107,11 @@ When rotation occurs, the existing file is renamed to include a timestamp suffix
 - `InfoOutputPath string` - optional path for info logs.
 - `DebugOutputPath string` - optional path for debug logs.
 - `TraceOutputPath string` - optional path for trace logs.
-- `RotateDaily bool` - enable daily rotation for file outputs.
+- `RotateDaily bool` - legacy switch for time-based rotation support.
 - `RotationTime string` - local rotation time in `HH:MM` format, for example `23:30`.
+- `RotationMode string` - rotation strategy: `none`, `time`, `size`, or `time-and-size`.
+- `MaxSizeBytes int64` - maximum size of the active log file before a size-based rotation occurs.
+- `RetentionDays int` - number of days to keep rotated files before they are removed.
 
 ## Logger methods
 
@@ -132,8 +157,10 @@ The library includes tests for:
 - log level parsing and behavior
 - per-level file output
 - standard logger compatibility
-- daily rotation scheduling
-- rotating file rename behavior
+- time-based rotation scheduling
+- size-based rotation behavior
+- midnight rollover naming for size-based rotation
+- retention cleanup of old rotated files
 
 ## License
 
